@@ -7,7 +7,8 @@ const {
     sendOTP, 
     signup, 
     login, 
-    changePassword 
+    changePassword,
+    logout
 } = require("../controllers/authController");
 
 const {resetPasswordToken, resetPassword} = require("../controllers/resetPasswordController");
@@ -20,10 +21,10 @@ const { auth } = require("../middlewares/authMiddleware");
 router.post("/sendOTP", sendOTP);
 router.post("/signup", signup);
 router.post("/login", login);
+router.post("/logout", auth, logout);
 
 // Private Routes (Protected; requires a valid JWT cookie or authorization header)
 router.post("/changePassword", auth, changePassword);
-
 
 // Public routes(Reset Password)
 router.post("/reset-password-token", resetPasswordToken);

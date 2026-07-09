@@ -127,6 +127,12 @@ exports.signup = async (req, res) => {
             additionalDetails: profile._id
         });
 
+        // Query and populate the newly created Agent document to return a standard Mongoose shape
+        const populatedAgent = await Agent.findById(agent._id)
+            .populate("additionalDetails")
+            .select("-password")
+            .exec();
+
         // 7. Generate JWT Token
         const token = generateToken(agent.email, agent._id);
         const options = {
@@ -139,16 +145,7 @@ exports.signup = async (req, res) => {
         return res.status(201).json({
             success: true,
             message: "Agent registered successfully",
-            agent: {
-                id: agent._id,
-                firstName: agent.firstName,
-                lastName: agent.lastName,
-                email: agent.email,
-                profile: {
-                    id: profile._id,
-                    avatarUrl: profile.avatarUrl
-                }
-            }
+            agent: populatedAgent
         });
 
     } catch (error) {
@@ -206,13 +203,7 @@ exports.login = async (req, res) => {
         return res.status(200).json({
             success: true,
             message: "Logged in successfully",
-            agent: {
-                id: agent._id,
-                firstName: agent.firstName,
-                lastName: agent.lastName,
-                email: agent.email,
-                profile: agent.additionalDetails // Contains populated avatarUrl, bio, etc.
-            }
+            agent: agent
         });
 
     } catch (error) {
@@ -220,6 +211,32 @@ exports.login = async (req, res) => {
         return res.status(500).json({
             success: false,
             message: "Internal server error"
+        });
+    }
+};
+
+
+// @desc    Clear active authentication cookie & logout Agent
+// @route   POST /api/v1/auth/logout
+// @access  Public
+exports.logout = async (req, res) => {
+    try {
+        // Clear the HttpOnly session cookie cleanly
+        res.clearCookie("token", {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "strict"
+        });
+
+        return res.status(200).json({
+            success: true,
+            message: "Cookie cleared. Logged out cleanly."
+        });
+    } catch (error) {
+        console.error("Logout error in authController:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Internal server error occurred during logout"
         });
     }
 };

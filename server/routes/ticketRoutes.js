@@ -8,7 +8,8 @@ const {
     saveConnectionRecording,
     closeTicket,
     startConnection,
-    validateTicket
+    validateTicket,
+    getUploadSignature
 } = require("../controllers/ticketController");
 
 const { auth } = require("../middleware/authMiddleware");
@@ -19,6 +20,7 @@ router.put("/close", auth, closeTicket);
 router.get("/history", auth, getAgentTickets);
 router.post("/upload-recording", auth, saveConnectionRecording);
 router.post("/connection-start", auth, startConnection);
+router.get("/upload-signature", auth, getUploadSignature);
 
 // Public Validation Route
 router.get("/validate/:roomId", validateTicket);

@@ -25,7 +25,7 @@ exports.getAgentDetails = async (req, res) => {
         return res.status(200).json({
             success: true,
             message: "Agent details fetched successfully",
-            data: agent
+            agent: agent
         });
 
     } catch (error) {
@@ -99,7 +99,7 @@ exports.updateProfile = async (req, res) => {
         return res.status(200).json({
             success: true,
             message: "Profile updated successfully",
-            data: updatedAgent
+            agent: updatedAgent
         });
 
     } catch (error) {

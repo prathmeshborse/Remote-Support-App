@@ -40,9 +40,9 @@ app.use(fileUpload({
 }));
 
 // 3. API Routes Mounting
-app.use("/api/auth", authRoutes);
-app.use("/api/profile", profileRoutes);
-app.use("/api/tickets", ticketRoutes);
+app.use("/api/v1/auth", authRoutes);
+app.use("/api/v1/profile", profileRoutes);
+app.use("/api/v1/tickets", ticketRoutes);
 
 // 4. Server & Socket.io Configuration
 const httpServer = createServer(app);

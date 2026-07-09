@@ -6,7 +6,7 @@ const { uploadToCloudinary } = require("../utils/uploadToCloudinary");
 const Agent = require("../models/Agent");
 const mailSender = require("../utils/mailSender");
 const supportInvitationTemplate = require("../email_template/supportInvitationTemplate");
-const { url } = require("inspector");
+const cloudinary = require("cloudinary").v2;
 
 // @desc    Create a new support ticket and generate a secure Room ID
 // @route   POST /api/tickets/create
@@ -108,26 +108,58 @@ exports.getAgentTickets = async (req, res) => {
     }
 };
 
+// @desc    Generate a secure, timed cryptographic signature for browser direct uploads
+// @route   GET /api/v1/tickets/upload-signature
+// @access  Private (Agent only)
+exports.getUploadSignature = async (req, res) => {
+    try {
+        const timestamp = Math.round(new Date().getTime() / 1000);
+        const folder = "support-recordings";
 
-// @desc    Upload recorded video segment to Cloudinary and link it to a specific connection
-// @route   POST /api/tickets/upload-recording
+        // Generate the signature utilizing Cloudinary's native cryptography helper
+        const signature = cloudinary.utils.api_sign_request(
+            {
+                timestamp,
+                folder,
+            },
+            process.env.API_SECRET
+        );
+
+        return res.status(200).json({
+            success: true,
+            signature,
+            timestamp,
+            apiKey: process.env.API_KEY,
+            cloudName: process.env.CLOUD_NAME,
+            folder
+        });
+    } catch (error) {
+        console.error("Signature generation failure:", error);
+        return res.status(500).json({
+            success: false,
+            message: "Internal server error occurred while generating secure signature"
+        });
+    }
+};
+
+
+// @desc    Save pre-uploaded Cloudinary video metadata to connection log (JSON payload only)
+// @route   POST /api/v1/tickets/upload-recording
 // @access  Private
 exports.saveConnectionRecording = async (req, res) => {
     try {
-        const { roomId, connectionId, startedAt, endedAt, duration } = req.body;
-        
-        // Assumes file-handling middleware (like express-fileupload) is configured on the server
-        const videoFile = req.files?.video; 
+        // Re-ordered logic: Perform database verifications BEFORE any external resource allocations
+        const { roomId, connectionId, url, publicId, startedAt, endedAt, duration } = req.body;
 
-        // 1. Validation check
-        if (!roomId || !connectionId || !videoFile) {
+        // 1. Core input verification
+        if (!roomId || !connectionId || !url || !publicId) {
             return res.status(400).json({
                 success: false,
-                message: "Room ID, Connection ID, and video file are required"
+                message: "Room ID, Connection ID, video URL, and public ID are required"
             });
         }
 
-        // 2. Find the parent Ticket document by roomId
+        // 2. Locate parent ticket
         const ticket = await Ticket.findOne({ roomId });
         if (!ticket) {
             return res.status(404).json({
@@ -136,7 +168,7 @@ exports.saveConnectionRecording = async (req, res) => {
             });
         }
 
-        // 3. Locate the sub-document connection using Mongoose's built-in .id() helper
+        // 3. Locate nested connection attempt via .id() helper
         const connection = ticket.connections.id(connectionId);
         if (!connection) {
             return res.status(404).json({
@@ -145,29 +177,21 @@ exports.saveConnectionRecording = async (req, res) => {
             });
         }
 
-        // 4. Upload video segment to Cloudinary
-        const uploadResponse = await uploadToCloudinary(
-            videoFile,
-            "support-recordings",
-            "auto",
-            "video"
-        );
-
-        // 5. Append the Cloudinary reference details directly to the connection
+        // 4. Save Cloudinary strings directly (zero file operations occur on the server)
         connection.recording = {
-            url: uploadResponse.secure_url,
-            publicId: uploadResponse.public_id,
+            url,
+            publicId,
             startedAt: startedAt ? new Date(startedAt) : undefined,
             endedAt: endedAt ? new Date(endedAt) : undefined,
             duration: duration ? Number(duration) : undefined
         };
 
-        // 6. Save the parent ticket document to write changes to DB
+        // 5. Save updates to database
         await ticket.save();
 
         return res.status(200).json({
             success: true,
-            message: "Recording successfully saved to connection segment",
+            message: "Recording successfully saved to database connection segment",
             data: connection
         });
 
@@ -175,7 +199,7 @@ exports.saveConnectionRecording = async (req, res) => {
         console.error("Error in saveConnectionRecording:", error);
         return res.status(500).json({
             success: false,
-            message: "Internal server error occurred during recording upload",
+            message: "Internal server error occurred during recording synchronization",
             error: error.message
         });
     }
