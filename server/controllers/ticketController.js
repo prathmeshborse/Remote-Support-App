@@ -232,7 +232,7 @@ exports.startConnection = async (req, res) => {
 
         // 3. Optional Integrity Check: If there's an unclosed connection, mark it as abruptly disconnected
         if (ticket.connections && ticket.connections.length > 0) {
-            const lastConn = ticket.connections[ticket.connections.length - 1];
+            const lastConnection = ticket.connections[ticket.connections.length - 1];
             if (!lastConnection.leftAt) {
                 lastConnection.leftAt = Date.now();
                 lastConnection.exitReason = "abrupt-disconnect";
@@ -269,12 +269,72 @@ exports.startConnection = async (req, res) => {
 };
 
 
-// @desc    Close and resolve support ticket with agent notes and clean exit tracking
-// @route   PUT /api/tickets/ticket-close
+// // @desc    Close and resolve support ticket with agent notes and clean exit tracking
+// // @route   PUT /api/tickets/ticket-close
+// // @access  Private
+// exports.closeTicket = async (req, res) => {
+//     try {
+//         const { roomId, overallStatus, agentNotes } = req.body;
+
+//         // 1. Validation check
+//         if (!roomId || !overallStatus) {
+//             return res.status(400).json({
+//                 success: false,
+//                 message: "Room ID and final status are required to close ticket"
+//             });
+//         }
+
+//         // 2. Locate the ticket by Room ID
+//         const ticket = await Ticket.findOne({ roomId });
+//         if (!ticket) {
+//             return res.status(404).json({
+//                 success: false,
+//                 message: "Ticket not found with provided Room ID"
+//             });
+//         }
+
+//         // 3. Update parent ticket details
+//         ticket.overallStatus = overallStatus;
+//         ticket.ticketEndTime = Date.now();
+//         if (agentNotes !== undefined) {
+//             ticket.agentNotes = agentNotes;
+//         }
+
+//         // 4. Clean Connection Close: Mark the last unclosed connection attempt as a clean exit
+//         if (ticket.connections && ticket.connections.length > 0) {
+//             const lastConnection = ticket.connections[ticket.connections.length - 1];
+//             if (!lastConnection.leftAt) {
+//                 lastConnection.leftAt = Date.now();
+//                 lastConnection.exitReason = "normal-exit"; // Log as clean exit
+//             }
+//         }
+
+//         // 5. Save updates
+//         await ticket.save();
+
+//         return res.status(200).json({
+//             success: true,
+//             message: "Support ticket successfully resolved and closed",
+//             data: ticket
+//         });
+
+//     } catch (error) {
+//         console.error("Error in closeTicket:", error);
+//         return res.status(500).json({
+//             success: false,
+//             message: "Internal server error occurred while closing ticket",
+//             error: error.message
+//         });
+//     }
+// };
+
+
+// @desc    Close and resolve support ticket with agent notes and clean exit tracking (Including P2P metadata)
+// @route   PUT /api/v1/tickets/close
 // @access  Private
 exports.closeTicket = async (req, res) => {
     try {
-        const { roomId, overallStatus, agentNotes } = req.body;
+        const { roomId, overallStatus, agentNotes, totalMessagesExchanged, filesTransferred } = req.body;
 
         // 1. Validation check
         if (!roomId || !overallStatus) {
@@ -300,16 +360,18 @@ exports.closeTicket = async (req, res) => {
             ticket.agentNotes = agentNotes;
         }
 
-        // 4. Clean Connection Close: Mark the last unclosed connection attempt as a clean exit
+        // 4. Clean Connection Close: Save metadata and exit reason in a single transaction [✓]
         if (ticket.connections && ticket.connections.length > 0) {
             const lastConnection = ticket.connections[ticket.connections.length - 1];
             if (!lastConnection.leftAt) {
                 lastConnection.leftAt = Date.now();
-                lastConnection.exitReason = "normal-exit"; // Log as clean exit
+                lastConnection.exitReason = "normal-exit";
+                lastConnection.totalMessagesExchanged = totalMessagesExchanged || 0;
+                lastConnection.filesTransferred = filesTransferred || [];
             }
         }
 
-        // 5. Save updates
+        // 5. Save updates atomically
         await ticket.save();
 
         return res.status(200).json({

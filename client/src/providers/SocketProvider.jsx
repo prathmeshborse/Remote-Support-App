@@ -24,8 +24,8 @@ export const SocketProvider = ({ children }) => {
     const [socket] = useState(() => 
         // 2. Initialize connection with HTTP cookie credentials enabled
         io(SOCKET_SERVER_URL, {
+            autoConnect: false,
             withCredentials: true, // Forces browser to pass HttpOnly JWT cookies on socket handshake
-            autoConnect: true,
             reconnectionAttempts: 5, // Auto-retry connection during temporary network drops
             reconnectionDelay: 1000
         })

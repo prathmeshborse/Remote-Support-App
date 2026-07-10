@@ -12,7 +12,7 @@ const {
     getUploadSignature
 } = require("../controllers/ticketController");
 
-const { auth } = require("../middleware/authMiddleware");
+const { auth } = require("../middlewares/authMiddleware");
 
 // Private/Protected Routes (Agents Only)
 router.post("/create", auth, createTicket);

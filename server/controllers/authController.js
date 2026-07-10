@@ -173,7 +173,7 @@ exports.login = async (req, res) => {
         }
 
         // 2. Find Agent and Populate their Profile details
-        const agent = await Agent.findOne({ email }).populate("additionalDetails").select("-password").exec();
+        const agent = await Agent.findOne({ email }).populate("additionalDetails");
         if (!agent) {
             return res.status(401).json({
                 success: false,
@@ -197,6 +197,9 @@ exports.login = async (req, res) => {
             expires: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
             httpOnly: true,
         }
+            
+        agent.password = undefined;
+        
         res.cookie("token", token, options);
 
         // 5. Return response (with populated profile details)

@@ -4,6 +4,8 @@ const express = require("express");
 const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const fileUpload = require("express-fileupload");
+const cookie = require("cookie"); // <-- Import the lightweight cookie parser
+const jwt = require("jsonwebtoken");
 const { Server } = require("socket.io");
 const { createServer } = require("http");
 
@@ -33,10 +35,9 @@ app.use(cors({
 app.use(express.json());
 app.use(cookieParser()); // Parses cookies into req.cookies
 
-// Configure express-fileupload to support streaming media to Cloudinary
 app.use(fileUpload({
     useTempFiles: true,
-    tempFileDir: "/tmp/" // Stashes video segments locally in temp directories before Cloudinary uploads
+    tempFileDir: "/tmp/"
 }));
 
 // 3. API Routes Mounting
@@ -54,7 +55,7 @@ const io = new Server(httpServer, {
     },
 });
 
-// Memory stores mapping users to socket sessions
+// Memory stores mapping active users to socket IDs
 const emailToSocket = new Map();
 const socketToEmail = new Map();
 
@@ -62,16 +63,36 @@ const socketToEmail = new Map();
 io.on("connection", (socket) => {
     console.log("A user connected: ", socket.id);
 
-    // Socket joins the secure support room
-    // Upgraded Handshake with Dynamic Session Locking inside server/index.js
+    // SECURE INTERCEPTOR: Automatically parse and verify HttpOnly JWT cookie on connection
+    try {
+        const cookies = socket.handshake.headers.cookie;
+        if (cookies) {
+            // Parse cookies from the handshake headers
+            const parsedCookies = require("cookie").parse(cookies);
+            const token = parsedToken = parsedCookies.token;
+
+            if (token) {
+                // Verify the JWT payload securely
+                const decoded = jwt.verify(token, process.env.JWT_SECRET);
+                // Bind the authenticated Agent's database ID directly to the socket context
+                socket.data.authenticatedAgentId = decoded.id;
+                console.log(`Socket ${socket.id} authenticated securely as Agent: ${decoded.id}`);
+            }
+        }
+    } catch (authError) {
+        // Safe fail: if it fails, socket.data.authenticatedAgentId remains undefined (e.g. client connections)
+        socket.data.authenticatedAgentId = null;
+    }
+
+    // Upgraded Secure Handshake with Dynamic Session Locking and Identity Verification
     socket.on("join-room", async ({ email, roomId, clientToken }) => {
         if (!email || !roomId) { return; }
 
         try {
-            // 1. Fetch active ticket and populate the Agent reference
+            // 1. Fetch the ticket from MongoDB
             const ticket = await Ticket.findOne({ roomId }).populate("agent");
             if (!ticket) {
-                socket.emit("join-error", { message: "Invalid room link" });
+                socket.emit("join-error", { message: "Invalid room link." });
                 return;
             }
 
@@ -81,41 +102,53 @@ io.on("connection", (socket) => {
                 return;
             }
 
-            // 3. Verify user identities matching the ticket whitelist
+            // 3. Security Verify identities
+            // A. Check if they are the authorized client
             const isClient = (email === ticket.clientEmail);
-            const isAgent = (ticket.agent && email === ticket.agent.email);
+            // B. Enforce that they are the EXACT Agent who created this ticket
+            const isCreatorAgent = (
+                ticket.agent && 
+                socket.data.authenticatedAgentId && 
+                socket.data.authenticatedAgentId === ticket.agent._id.toString()
+            );
 
-            if (!isClient && !isAgent) {
-                socket.emit("join-error", { message: "Access denied. Email is not authorized for this support ticket." });
+            if (!isClient && !isCreatorAgent) {
+                socket.emit("join-error", { message: "Access denied. You are not authorized to join this workspace." });
+                console.warn(`Blocked unauthorized access attempt for email ${email} in room ${roomId}`);
                 return;
             }
+            
+            // ----------------------------------------------------------------
+            // NEW FIX: Map Socket Connections immediately upon successful validation [2.1]
+            // This ensures sandboxed clients are fully mapped before the Agent arrives!
+            // ----------------------------------------------------------------
+            emailToSocket.set(email, socket.id);
+            socketToEmail.set(socket.id, email);
+            // ----------------------------------------------------------------
 
-            // 4. Role-Based Gateway
-            if (isAgent) {
-                // If Agent joins, connect them immediately
+            
+            // 4. Role-Based Routing
+            if (isCreatorAgent) {
+                // Agent joins cleanly
                 socket.join(roomId);
                 socket.data.email = email;
                 socket.data.roomId = roomId;
                 socket.data.isAgent = true;
 
-                emailToSocket.set(email, socket.id);
-                socketToEmail.set(socket.id, email);
-
                 socket.emit("room-joined", { roomId, role: "agent" });
                 
-                // Broadcast presence to any waiting clients currently inside the room
+                // Alert any sandboxed clients currently waiting inside the room
                 socket.to(roomId).emit("agent-joined", { email });
-                console.log(`Agent ${email} activated and joined room ${roomId}`);
+                console.log(`Creator Agent ${email} joined and activated room ${roomId}`);
 
             } else if (isClient) {
                 // --------------------------------------------------------
-                // SECURITY ADDITION: DYNAMIC SESSION LOCKING
+                // ANTI-HIJACKING GATEKEEPER: DYNAMIC SESSION LOCKING
                 // --------------------------------------------------------
                 let verifiedToken = clientToken;
 
-                // Case A: The ticket is already locked to a specific browser
                 if (ticket.clientToken) {
-                    // Reject the request if the incoming token does not match the lock in the database
+                    // Mismatch: Different browser tries to claim the same email
                     if (ticket.clientToken !== clientToken) {
                         socket.emit("join-error", { 
                             message: "Access denied. This support session is already active on another browser or device." 
@@ -124,51 +157,43 @@ io.on("connection", (socket) => {
                         return;
                     }
                     
-                    // The token matches! (This is the same client refreshing their browser or switching tabs)
-                    // To handle refreshes and prevent duplicate ghost streams, disconnect the older active socket:
+                    // Match: Same browser reloads or re-joins. Terminate older active socket to handle refreshes cleanly
                     const activeSockets = await io.in(roomId).fetchSockets();
                     for (const activeSocket of activeSockets) {
                         if (activeSocket.data.email === email && activeSocket.id !== socket.id) {
                             activeSocket.emit("kicked", { message: "Session opened in another window" });
-                            activeSocket.disconnect(true); // Terminate the old socket cleanly
-                            console.log(`Disconnected redundant socket session for client ${email}`);
+                            activeSocket.disconnect(true);
+                            console.log(`Terminated redundant socket session for client ${email}`);
                         }
                     }
-                } 
-                // Case B: This is the client's first connection attempt (No lock exists yet)
-                else {
-                    // Generate a cryptographically secure UUID natively
+                } else {
+                    // First Join: Lock this ticket to this client's browser
                     const crypto = require("crypto");
                     const generatedToken = crypto.randomUUID();
 
-                    // Persist the token to MongoDB to lock the room
                     ticket.clientToken = generatedToken;
                     await ticket.save();
 
-                    verifiedToken = generatedToken; // Send this token back to React for localStorage saving
+                    verifiedToken = generatedToken;
                     console.log(`Locked room ${roomId} to client token: ${verifiedToken}`);
                 }
                 // --------------------------------------------------------
 
-                // Gatekeeper: Inspect active sockets in room to verify Agent presence
+                // Gatekeeper Check: Ensure the creator Agent is actively online in the room
                 const activeSockets = await io.in(roomId).fetchSockets();
                 const isAgentPresent = activeSockets.some(s => s.data.isAgent === true);
 
                 if (isAgentPresent) {
-                    // Agent is present. Allow client to join and send them their verified token
+                    // Agent is online. Connect the Client to signaling pool immediately
                     socket.join(roomId);
                     socket.data.email = email;
                     socket.data.roomId = roomId;
                     socket.data.isAgent = false;
 
-                    emailToSocket.set(email, socket.id);
-                    socketToEmail.set(socket.id, email);
-
                     socket.emit("room-joined", { roomId, role: "client", clientToken: verifiedToken });
                     console.log(`Client ${email} joined active room ${roomId}`);
                 } else {
-                    // Agent is offline. Sandbox client so they can listen for "agent-joined" triggers,
-                    // but instruct the React app to display the "Waiting Lobby" screen.
+                    // Agent is offline. Sandbox the Client in a waiting state
                     socket.join(roomId);
                     socket.data.email = email;
                     socket.data.roomId = roomId;
@@ -181,7 +206,7 @@ io.on("connection", (socket) => {
 
         } catch (error) {
             console.error("Socket join-room Error:", error);
-            socket.emit("join-error", { message: "Internal server error occurred during connection handshake" });
+            socket.emit("join-error", { message: "Internal server error during connection handshake." });
         }
     });
 
@@ -226,24 +251,26 @@ io.on("connection", (socket) => {
         socket.to(socketId).emit('incoming-ice-candidate', { candidate });
     });
 
-    // Voluntary leave room signal
-    socket.on("leave-room", async ({ roomId, email }) => { // Make this handler async
+    // Voluntary leave room signal (Combines connection closure and metadata logging in a single save) [✓]
+    socket.on("leave-room", async ({ roomId, email, totalMessagesExchanged, filesTransferred }) => {
         if (roomId && email) {
             socket.to(roomId).emit("user-left", { email });
             console.log(`${email} left room ${roomId} voluntarily.`);
 
-            // MongoDB Audit Trail: Update the DB Connection to "normal-exit" on voluntary departure
+            // MongoDB Audit Trail: Update the DB Connection in a single atomic transaction [4.1]
             try {
                 const ticket = await Ticket.findOne({ roomId });
                 if (ticket && ticket.connections.length > 0) {
                     const lastConnection = ticket.connections[ticket.connections.length - 1];
                     
-                    // If the connection is unclosed, record the clean departure
+                    // If the connection is unclosed, record the clean departure and metadata
                     if (!lastConnection.leftAt) {
                         lastConnection.leftAt = Date.now();
-                        lastConnection.exitReason = "normal-exit"; // Log as clean voluntary exit
+                        lastConnection.exitReason = "normal-exit";
+                        lastConnection.totalMessagesExchanged = totalMessagesExchanged || 0;
+                        lastConnection.filesTransferred = filesTransferred || [];
                         await ticket.save();
-                        console.log(`Logged voluntary departure audit for room ${roomId}`);
+                        console.log(`Logged voluntary departure and synchronized metadata for room ${roomId}`);
                     }
                 }
             } catch (dbError) {
@@ -253,7 +280,7 @@ io.on("connection", (socket) => {
     });
 
     // Sudden disconnection or page refreshes
-    socket.on("disconnect", async () => { // Make this function async so we can use await
+    socket.on("disconnect", async () => {
         const email = socketToEmail.get(socket.id);
         const roomId = socket.data.roomId;
 
@@ -276,7 +303,6 @@ io.on("connection", (socket) => {
                 if (ticket && ticket.connections.length > 0) {
                     const lastConnection = ticket.connections[ticket.connections.length - 1];
                     
-                    // If the connection is unclosed, record the drop timestamp and cause
                     if (!lastConnection.leftAt) {
                         lastConnection.leftAt = Date.now();
                         lastConnection.exitReason = "abrupt-disconnect";
@@ -290,7 +316,6 @@ io.on("connection", (socket) => {
         }
     });
 });
-
 
 // 6. Start Consolidated Server
 const PORT = process.env.PORT || 3000;
