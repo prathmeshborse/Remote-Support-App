@@ -20,8 +20,15 @@ export default function ChatPanel({
 
   const isDataChannelOpen = dataChannel?.readyState === "open";
 
+  // Safeguard arraybuffer binary type assignment
+  useEffect(() => {
+    if (dataChannel) {
+      dataChannel.binaryType = "arraybuffer";
+    }
+  }, [dataChannel]);
+
   // ----------------------------------------------------------------
-  // P2P SENDER: Slices files into 16KB binary chunks and transmits P2P [1]
+  // P2P SENDER: Slices files into 16KB binary chunks and transmits P2P
   // ----------------------------------------------------------------
   const handleFileChange = async (e) => {
     const file = e.target.files[0];
@@ -29,7 +36,7 @@ export default function ChatPanel({
 
     setTransferProgress({ name: file.name, progress: 0, type: "sending" });
 
-    // 1. Send the file metadata header packet over the channel [1]
+    // 1. Send the file metadata header packet over the channel
     dataChannel.send(JSON.stringify({
       type: "file-meta",
       fileName: file.name,
@@ -38,7 +45,7 @@ export default function ChatPanel({
       senderRole: isAgent ? "agent" : "client"
     }));
 
-    const CHUNK_SIZE = 16384; // 16KB WebRTC chunk safety limit [1]
+    const CHUNK_SIZE = 16384; // 16KB WebRTC chunk safety limit
     const fileReader = new FileReader();
     let offset = 0;
 
@@ -50,22 +57,22 @@ export default function ChatPanel({
 
     fileReader.onload = async (event) => {
       const chunk = event.target.result;
-      dataChannel.send(chunk); // Send raw binary ArrayBuffer over the channel [1]
+      dataChannel.send(chunk); // Send raw binary ArrayBuffer over the channel
       offset += chunk.byteLength;
 
       // Update local progress bar
       const progress = Math.round((offset / file.size) * 100);
       setTransferProgress({ name: file.name, progress, type: "sending" });
 
-      // WebRTC Backpressure / Buffer Flow Control [1]
-      // If the outgoing queue exceeds 1MB, pause sending until buffer clears
+      // WebRTC Backpressure / Buffer Flow Control
+      // If the outgoing queue exceeds 1MB, pause sending until buffer clears safely below 64KB
       if (dataChannel.bufferedAmount > 1048576) {
         await new Promise((resolve) => {
           const checkBuffer = () => {
-            if (dataChannel.bufferedAmount === 0) {
+            if (dataChannel.bufferedAmount < 65536) {
               resolve();
             } else {
-              setTimeout(checkBuffer, 50); // Poll every 50ms [1]
+              setTimeout(checkBuffer, 50); // Poll every 50ms
             }
           };
           checkBuffer();
@@ -75,7 +82,7 @@ export default function ChatPanel({
       if (offset < file.size) {
         readNextChunk(); // Load next chunk
       } else {
-        // 2. All chunks sent successfully. Send footer packet over WebRTC [1]
+        // 2. All chunks sent successfully. Send footer packet over WebRTC
         dataChannel.send(JSON.stringify({ type: "file-end" }));
         setTransferProgress(null);
         toast.success("File sent successfully!");
@@ -90,7 +97,7 @@ export default function ChatPanel({
         // Append to local list
         setSharedFiles((prev) => [...prev, { ...fileMeta, isLocal: true }]);
         
-        // Notify parent Room page so it updates the DB metadata state array [1]
+        // Notify parent Room page so it updates the DB metadata state array
         onFileLogged?.(fileMeta);
         
         // Reset file input element
@@ -102,17 +109,20 @@ export default function ChatPanel({
   };
 
   // ----------------------------------------------------------------
-  // P2P RECEIVER: Reassembles incoming binary buffers [1]
+  // P2P RECEIVER: Reassembles incoming binary buffers
   // ----------------------------------------------------------------
   useEffect(() => {
     if (!dataChannel) return;
+
+    // Explicitly enforce arraybuffer binary type to support reliable cross-browser binary file chunks
+    dataChannel.binaryType = "arraybuffer";
 
     let receivedChunks = [];
     let activeFileInfo = null;
     let receivedSize = 0;
 
     const handleMessage = (event) => {
-      // Case A: Incoming chunk is binary (ArrayBuffer) [1]
+      // Case A: Incoming chunk is binary (ArrayBuffer)
       if (event.data instanceof ArrayBuffer) {
         receivedChunks.push(event.data);
         receivedSize += event.data.byteLength;
@@ -129,7 +139,7 @@ export default function ChatPanel({
         const payload = JSON.parse(event.data);
 
         if (payload.type === "file-meta") {
-          // Initialize incoming buffer [1]
+          // Initialize incoming buffer
           receivedChunks = [];
           receivedSize = 0;
           activeFileInfo = {
@@ -142,7 +152,7 @@ export default function ChatPanel({
           toast(`Incoming file: ${payload.fileName}`, { icon: "📁" });
         } 
         else if (payload.type === "file-end" && activeFileInfo) {
-          // Compile chunks into a single binary Blob and generate a download link [1]
+          // Compile chunks into a single binary Blob and generate a download link
           const fileBlob = new Blob(receivedChunks, { type: activeFileInfo.type });
           const downloadUrl = URL.createObjectURL(fileBlob);
 
@@ -158,7 +168,7 @@ export default function ChatPanel({
           setTransferProgress(null);
           toast.success(`File received: ${activeFileInfo.name}`);
           
-          // Notify parent Room page to update DB metadata logging state array [1]
+          // Notify parent Room page to update DB metadata logging state array
           onFileLogged?.({
             fileName: activeFileInfo.name,
             fileSize: activeFileInfo.size,
@@ -182,7 +192,7 @@ export default function ChatPanel({
     };
   }, [dataChannel, onFileLogged]);
 
-  // Clean up object URLs on unmount to prevent memory leaks [2]
+  // Clean up object URLs on unmount to prevent memory leaks
   useEffect(() => {
     return () => {
       sharedFiles.forEach(file => {

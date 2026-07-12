@@ -69,7 +69,7 @@ io.on("connection", (socket) => {
         if (cookies) {
             // Parse cookies from the handshake headers
             const parsedCookies = require("cookie").parse(cookies);
-            const token = parsedToken = parsedCookies.token;
+            const token = parsedCookies.token;
 
             if (token) {
                 // Verify the JWT payload securely
@@ -119,7 +119,7 @@ io.on("connection", (socket) => {
             }
             
             // ----------------------------------------------------------------
-            // NEW FIX: Map Socket Connections immediately upon successful validation [2.1]
+            // Map Socket Connections immediately upon successful validation
             // This ensures sandboxed clients are fully mapped before the Agent arrives!
             // ----------------------------------------------------------------
             emailToSocket.set(email, socket.id);
@@ -251,27 +251,41 @@ io.on("connection", (socket) => {
         socket.to(socketId).emit('incoming-ice-candidate', { candidate });
     });
 
-    // Voluntary leave room signal (Combines connection closure and metadata logging in a single save) [✓]
+    // Real-time resolution signal forwarder
+    socket.on("ticket-resolved", ({ roomId }) => {
+        if (roomId) {
+            socket.to(roomId).emit("ticket-resolved");
+            console.log(`Ticket resolution signal broadcasted to room ${roomId}`);
+        }
+    });
+
+    // Voluntary leave room signal (Optimized using atomic update)
     socket.on("leave-room", async ({ roomId, email, totalMessagesExchanged, filesTransferred }) => {
         if (roomId && email) {
             socket.to(roomId).emit("user-left", { email });
             console.log(`${email} left room ${roomId} voluntarily.`);
 
-            // MongoDB Audit Trail: Update the DB Connection in a single atomic transaction [4.1]
+            // MongoDB Audit Trail: Update the DB Connection in a single atomic transaction
             try {
-                const ticket = await Ticket.findOne({ roomId });
-                if (ticket && ticket.connections.length > 0) {
-                    const lastConnection = ticket.connections[ticket.connections.length - 1];
-                    
-                    // If the connection is unclosed, record the clean departure and metadata
-                    if (!lastConnection.leftAt) {
-                        lastConnection.leftAt = Date.now();
-                        lastConnection.exitReason = "normal-exit";
-                        lastConnection.totalMessagesExchanged = totalMessagesExchanged || 0;
-                        lastConnection.filesTransferred = filesTransferred || [];
-                        await ticket.save();
-                        console.log(`Logged voluntary departure and synchronized metadata for room ${roomId}`);
+                const result = await Ticket.updateOne(
+                    { 
+                        roomId, 
+                        "connections.leftAt": null 
+                    },
+                    { 
+                        $set: { 
+                            "connections.$.leftAt": Date.now(),
+                            "connections.$.exitReason": "normal-exit",
+                            "connections.$.totalMessagesExchanged": totalMessagesExchanged || 0,
+                            "connections.$.filesTransferred": filesTransferred || []
+                        } 
                     }
+                );
+
+                if (result.modifiedCount > 0) {
+                    console.log(`Logged voluntary departure and synchronized metadata for room ${roomId}`);
+                } else {
+                    console.log(`Voluntary departure already logged for room ${roomId}`);
                 }
             } catch (dbError) {
                 console.error("Database leave-room audit error:", dbError);
@@ -279,7 +293,7 @@ io.on("connection", (socket) => {
         }
     });
 
-    // Sudden disconnection or page refreshes
+    // Sudden disconnection or page refreshes (Optimized using atomic update)
     socket.on("disconnect", async () => {
         const email = socketToEmail.get(socket.id);
         const roomId = socket.data.roomId;
@@ -299,16 +313,21 @@ io.on("connection", (socket) => {
         // MongoDB Audit Trail: Automatically write disconnect metadata on WebSocket drops
         if (roomId) {
             try {
-                const ticket = await Ticket.findOne({ roomId });
-                if (ticket && ticket.connections.length > 0) {
-                    const lastConnection = ticket.connections[ticket.connections.length - 1];
-                    
-                    if (!lastConnection.leftAt) {
-                        lastConnection.leftAt = Date.now();
-                        lastConnection.exitReason = "abrupt-disconnect";
-                        await ticket.save();
-                        console.log(`Logged abrupt disconnection audit for room ${roomId}`);
+                const result = await Ticket.updateOne(
+                    { 
+                        roomId, 
+                        "connections.leftAt": null 
+                    },
+                    { 
+                        $set: { 
+                            "connections.$.leftAt": Date.now(),
+                            "connections.$.exitReason": "abrupt-disconnect"
+                        } 
                     }
+                );
+
+                if (result.modifiedCount > 0) {
+                    console.log(`Logged abrupt disconnection audit for room ${roomId}`);
                 }
             } catch (dbError) {
                 console.error("Database disconnect audit error:", dbError);

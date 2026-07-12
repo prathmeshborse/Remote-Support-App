@@ -14,7 +14,7 @@ import AgentProfileDrawer from "../components/core/Dashboard/AgentProfileDrawer"
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { agent, logout, updateAgentProfile, deleteAgentAccount } = useAuth();
+  const { agent, logout, updateAgentProfile, deleteAgentAccount, changePassword } = useAuth();
 
   // Core Dynamic States
   const [tickets, setTickets] = useState([]);
@@ -55,6 +55,10 @@ export default function Dashboard() {
       bio: updatedFields.bio
     };
     await updateAgentProfile(payload);
+  };
+
+  const hadnleChangePassword = async ({oldPassword, newPassword, confirmNewPassword}) => {
+    await changePassword(oldPassword, newPassword, confirmNewPassword)
   };
 
   // Handler: Secure Logout sequence clearing token cookies
@@ -115,6 +119,7 @@ export default function Dashboard() {
         agent={agent}
         onSave={handleSaveProfile}
         onDeleteAccount={handleDeleteAccount}
+        onPasswordChange={hadnleChangePassword}
       />
     </div>
   );

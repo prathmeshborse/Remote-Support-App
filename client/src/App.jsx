@@ -20,35 +20,6 @@ import ResetPassword from "./pages/ResetPassword";
 import Dashboard from "./pages/Dashboard";
 import Room from "./pages/Room";
 
-// ------------------------------------------------------------------
-// Temporary Mock Skeletons (Prevents Vite compiler errors during test)
-// ------------------------------------------------------------------
-const DashboardPlaceholder = () => (
-  <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center font-sans">
-    <div className="bg-white border border-slate-100 p-8 rounded-2xl shadow-sm text-center">
-      <h2 className="text-xl font-bold text-slate-800 mb-2">Agent Dashboard</h2>
-      <p className="text-sm text-slate-500 mb-6">Build in progress. Your session is successfully authorized.</p>
-      <button 
-        onClick={() => window.location.reload()} 
-        className="text-xs font-semibold text-blue-600 hover:text-blue-700 bg-blue-50 hover:bg-blue-100/50 px-4 py-2 rounded-full transition-all"
-      >
-        Trigger Silent Auto-Login Test
-      </button>
-    </div>
-  </div>
-);
-
-const RoomPlaceholder = () => (
-  <div className="min-h-screen bg-slate-50 flex items-center justify-center font-sans">
-    <div className="bg-white border border-slate-100 p-8 rounded-2xl shadow-sm text-center">
-      <h2 className="text-xl font-bold text-slate-800 mb-2">P2P Support Room</h2>
-      <p className="text-sm text-slate-500">Build in progress. Shared video and chat workspace will mount here.</p>
-    </div>
-  </div>
-);
-
-// ------------------------------------------------------------------
-
 const App = () => {
   return (
     // Wrap the routing context under the unified providers tree

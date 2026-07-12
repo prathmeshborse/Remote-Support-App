@@ -105,6 +105,106 @@ export default function Room() {
     const localVideoRef = useRef(null);
     const remoteVideoRef = useRef(null);
 
+    // Reference sync to prevent stale hook closures inside browser events
+    const isJoinedRef = useRef(isJoined);
+    useEffect(() => {
+        isJoinedRef.current = isJoined;
+    }, [isJoined]);
+
+    // ----------------------------------------------------------------
+    // UNIFIED HARDWARE TEARDOWN HELPER
+    // ----------------------------------------------------------------
+    const stopAllLocalMedia = useCallback(() => {
+        // 1. Stop all tracks in the primary camera/microphone stream
+        if (localStreamRef.current) {
+            localStreamRef.current.getTracks().forEach(track => {
+                track.stop();
+                console.log(`Stopped webcam/microphone track: ${track.label}`);
+            });
+            localStreamRef.current = null;
+        }
+
+        // 2. Stop any active screen sharing tracks currently bound to the video element
+        if (localVideoRef.current && localVideoRef.current.srcObject) {
+            localVideoRef.current.srcObject.getTracks().forEach(track => {
+                track.stop();
+                console.log(`Stopped active video element track: ${track.label}`);
+            });
+            localVideoRef.current.srcObject = null;
+        }
+
+        setLocalStream(null);
+        setIsSharingScreen(false);
+    }, []);
+
+    // ----------------------------------------------------------------
+    // SAFARI GRACEFUL WEB-DEVICE RECOVERY ENGINE
+    // ----------------------------------------------------------------
+    const recoverLocalTracks = useCallback(async () => {
+        try {
+            console.log("Device change or capture failure detected. Initiating track recovery...");
+
+            stopAllLocalMedia();
+
+            // Re-acquire fresh microphone and camera hardware streams
+            const freshStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                },
+                video: true
+            });
+
+            setLocalStream(freshStream);
+            localStreamRef.current = freshStream;
+
+            if (localVideoRef.current) {
+                localVideoRef.current.srcObject = freshStream;
+                localVideoRef.current.muted = true;
+            }
+
+            // Hot-swap the fresh audio and video tracks directly in WebRTC
+            const audioTrack = freshStream.getAudioTracks()[0];
+            const videoTrack = freshStream.getVideoTracks()[0];
+
+            if (audioTrack) await replaceTrack("audio", audioTrack);
+            if (videoTrack) await replaceTrack("video", videoTrack);
+
+            // Rebind safety triggers to the new stream
+            bindTrackRecoveryListeners(freshStream);
+
+            return freshStream;
+        } catch (err) {
+            console.error("Failed to recover audio/video tracks dynamically:", err);
+            return null;
+        }
+    }, [replaceTrack, stopAllLocalMedia]);
+
+    const bindTrackRecoveryListeners = useCallback((stream) => {
+        if (!stream) return;
+        stream.getTracks().forEach(track => {
+            track.onended = () => {
+                console.warn(`Local MediaStreamTrack ended unexpectedly: ${track.label}`);
+                
+                // Triggers dynamic re-routing if headphones are pulled on macOS Safari
+                if (isJoinedRef.current) {
+                    toast.loading("Rerouting audio/video signals...", { id: "media-recovery" });
+                    
+                    // Cooldown window allowing macOS audio engine to resolve default hardware switches
+                    setTimeout(async () => {
+                        const recovered = await recoverLocalTracks();
+                        if (recovered) {
+                            toast.success("Connection signals re-established!", { id: "media-recovery" });
+                        } else {
+                            toast.error("Failed to recover hardware capture.", { id: "media-recovery" });
+                        }
+                    }, 1200);
+                }
+            };
+        });
+    }, [recoverLocalTracks]);
+
     // Pre-Flight Verification & Auto-Connection Lifecycle
     useEffect(() => {
         const runPreFlightCheck = async () => {
@@ -155,25 +255,30 @@ export default function Room() {
         return () => clearInterval(interval);
     }, [connectionStatus]);
 
-    // Capture Webcam and Microphone Drivers (Updated with defensive track stop)
+    // Capture Webcam and Microphone Drivers (Updated with echo cancellation and local mute safeguard)
     const initLocalMedia = useCallback(async () => {
         try {
-            // Stop any existing tracks cleanly before asking for a new stream
-            if (localStreamRef.current) {
-                localStreamRef.current.getTracks().forEach(track => {
-                    track.stop();
-                    console.log(`Defensively released existing track: ${track.label}`);
-                });
-                localStreamRef.current = null;
-            }
+            stopAllLocalMedia();
 
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+            // Secure echo cancellation audio constraints
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }, 
+                video: true 
+            });
             setLocalStream(stream);
             localStreamRef.current = stream;
 
             if (localVideoRef.current) {
                 localVideoRef.current.srcObject = stream;
+                localVideoRef.current.muted = true; // Safeguard: Keep local microphone output silent on local speaker
             }
+
+            // Bind Safari safety crash capture watchdogs
+            bindTrackRecoveryListeners(stream);
 
             await sendStream(stream);
             return stream;
@@ -182,12 +287,13 @@ export default function Room() {
             console.error(err);
             return null;
         }
-    }, [sendStream]);
+    }, [sendStream, bindTrackRecoveryListeners, stopAllLocalMedia]);
 
     // Bind local stream
     useEffect(() => {
         if (localVideoRef.current && localStream) {
             localVideoRef.current.srcObject = localStream;
+            localVideoRef.current.muted = true; // Programmatic fallback safeguard
         }
     }, [localStream]);
 
@@ -212,22 +318,9 @@ export default function Room() {
     // ----------------------------------------------------------------
     useEffect(() => {
         return () => {
-            // 1. Stop all tracks inside the current active stream reference
-            if (localStreamRef.current) {
-                localStreamRef.current.getTracks().forEach(track => {
-                    track.stop();
-                    console.log(`Released hardware track: ${track.label}`);
-                });
-            }
-            // 2. Stop any active screen sharing tracks currently bound to the video element
-            if (localVideoRef.current && localVideoRef.current.srcObject) {
-                localVideoRef.current.srcObject.getTracks().forEach(track => {
-                    track.stop();
-                    console.log(`Released screen share track: ${track.label}`);
-                });
-            }
+            stopAllLocalMedia();
         };
-    }, []); // <-- EMPTY DEPENDENCY ARRAY: Runs strictly once on unmount!
+    }, [stopAllLocalMedia]); // <-- Cleanup triggers on unmount
 
     // Bind remote stream
     useEffect(() => {
@@ -260,10 +353,11 @@ export default function Room() {
         setRemotePeerEmail(email);
         setRemoteEmail(email); // Save client email locally to trigger the initiator hook
 
-        // Create reliable P2P DataChannel on Agent side
-        const channel = initDataChannel("supportChannel");
-        setupDataChannel(channel);
-    }, [setRemotePeerEmail, initDataChannel]);
+        // Create reliable P2P DataChannel STRICTLY on the Agent side to prevent dual-channel collisions!
+        if (agent) {
+            initDataChannel("supportChannel");
+        }
+    }, [agent, setRemotePeerEmail, initDataChannel]);
 
     const handleIncomingCall = useCallback(async ({ from, offer }) => {
         console.log(`Receiving live Offer handshake from: ${from}`);
@@ -302,17 +396,9 @@ export default function Room() {
         hasSentTelemetryRef.current = false; // Reset lock for next potential rejoin attempt
         setRemoteEmail(null); // Clear remote email reference
 
-        // ----------------------------------------------------------------
-        // STRICT HARDWARE TEARDOWN: Physically stop all camera/mic tracks on disconnect
-        // ----------------------------------------------------------------
-        if (localStreamRef.current) {
-            localStreamRef.current.getTracks().forEach(track => {
-                track.stop();
-                console.log(`Stopped physical track on disconnect: ${track.label}`);
-            });
-            localStreamRef.current = null;
-        }
-        setLocalStream(null); // Release state reference
+        // STRICT HARDWARE TEARDOWN: Release all media (webcam, mic, screen share)
+        stopAllLocalMedia();
+        
         setIsMicMuted(false); // Reset mute state
         setIsCamMuted(false); // Reset camera state
 
@@ -323,7 +409,34 @@ export default function Room() {
         if (!agent) {
             setIsWaitingForAgent(true);
         }
-    }, [resetPeerConnection, socket, roomId, agent]); // Cleaned up dependencies safely using localStreamRef.current
+    }, [resetPeerConnection, socket, roomId, agent, stopAllLocalMedia]); // Cleaned up dependencies safely using localStreamRef.current
+
+    // Unified Clean Leave Function
+    const handleLeaveRoom = useCallback(() => {
+        if (socket.connected && activeConnectionIdRef.current) {
+            socket.emit("leave-room", {
+                roomId,
+                email: agent ? agent.email : localStorage.getItem("user-email"),
+                totalMessagesExchanged: messagesCountRef.current,
+                filesTransferred: filesTransferredRef.current
+            });
+        }
+
+        stopAllLocalMedia();
+
+        socket.emit("leave-room", { roomId, email: agent ? agent.email : ticketDetails?.clientEmail });
+        resetPeerConnection();
+
+        setIsRecording(false);
+        setIsRemoteRecording(false);
+        setRecordingDialog(false);
+        recordedChunksRef.current = [];
+        hasSentTelemetryRef.current = false;
+        setRemoteEmail(null); 
+
+        toast.success("Disconnected from room.");
+        navigate(agent ? "/dashboard" : "/");
+    }, [socket, roomId, agent, ticketDetails, resetPeerConnection, stopAllLocalMedia, navigate]);
 
     // Bind Signaling Socket event listeners (Updated with double-init guards)
     useEffect(() => {
@@ -331,6 +444,12 @@ export default function Room() {
         socket.on("incoming-call", handleIncomingCall);
         socket.on("call-accepted", handleCallAccepted);
         socket.on("user-left", handleUserLeft);
+
+        // Receive real-time ticket close-out signal
+        socket.on("ticket-resolved", () => {
+            toast.success("This support session has been resolved and closed by the representative.", { duration: 5000 });
+            handleLeaveRoom();
+        });
 
         socket.on("room-joined", async ({ role, clientToken }) => {
             if (role === "client") {
@@ -375,28 +494,35 @@ export default function Room() {
             socket.off("incoming-call", handleIncomingCall);
             socket.off("call-accepted", handleCallAccepted);
             socket.off("user-left", handleUserLeft);
+            socket.off("ticket-resolved");
             socket.off("room-joined");
             socket.off("waiting-for-agent");
             socket.off("agent-joined");
             socket.off("join-error");
         };
-    }, [socket, handleUserJoined, handleIncomingCall, handleCallAccepted, handleUserLeft, initLocalMedia, roomId]);
+    }, [socket, handleUserJoined, handleIncomingCall, handleCallAccepted, handleUserLeft, handleLeaveRoom, initLocalMedia, roomId]);
 
     // ----------------------------------------------------------------
-    // SCTP DataChannel Event Handlers
+    // SCTP DataChannel Event Handlers (Updated with robust addEventListener pattern and binaryType configuration)
     // ----------------------------------------------------------------
     const setupDataChannel = useCallback((channel) => {
         if (!channel) return;
 
-        channel.onopen = () => {
+        // Enforce arraybuffer binary type to support reliable cross-browser binary file chunks
+        channel.binaryType = "arraybuffer";
+
+        const handleOpen = () => {
             console.log("P2P DataChannel active.");
             if (agent) {
                 channel.send(JSON.stringify({ type: "request-telemetry" }));
             }
         };
 
-        channel.onmessage = async (event) => {
+        const handleMessage = async (event) => {
             try {
+                // Safeguard: Ignore non-string data (such as binary file chunks) in the primary signaling processor
+                if (typeof event.data !== "string") return;
+
                 const payload = JSON.parse(event.data);
                 if (payload.type === "chat") {
                     setMessages((prev) => [...prev, { sender: "remote", text: payload.text }]);
@@ -427,14 +553,26 @@ export default function Room() {
                     }
                 }
             } catch (err) {
-                console.warn("Unreadable DataChannel packet.");
+                // Silently skip unexpected message structures or JSON evaluation errors
             }
+        };
+
+        // Attach listeners dynamically using addEventListener to protect other bindings (e.g. file sharing in ChatPanel)
+        channel.addEventListener("open", handleOpen);
+        channel.addEventListener("message", handleMessage);
+
+        return () => {
+            channel.removeEventListener("open", handleOpen);
+            channel.removeEventListener("message", handleMessage);
         };
     }, [agent, clientSpecs, roomId]);
 
     useEffect(() => {
         if (dataChannel) {
-            setupDataChannel(dataChannel);
+            const cleanup = setupDataChannel(dataChannel);
+            return () => {
+                if (cleanup) cleanup();
+            };
         }
     }, [dataChannel, setupDataChannel]);
 
@@ -650,7 +788,12 @@ export default function Room() {
 
             if (localVideoRef.current) {
                 localVideoRef.current.srcObject = combinedStream;
+                localVideoRef.current.muted = true; // Safeguard: Maintain mute on webcam swap
             }
+
+            // Re-bind safety listeners
+            bindTrackRecoveryListeners(combinedStream);
+
             setIsCamMuted(false); 
         } catch (err) {
             console.error("Failed to revert to webcam:", err);
@@ -674,36 +817,6 @@ export default function Room() {
         setIsJoined(true);
     };
 
-    const handleLeaveRoom = () => {
-        if (socket.connected && activeConnectionIdRef.current) {
-            socket.emit("leave-room", {
-                roomId,
-                email: agent ? agent.email : localStorage.getItem("user-email"),
-                totalMessagesExchanged: messagesCountRef.current,
-                filesTransferred: filesTransferredRef.current
-            });
-        }
-
-        if (localStreamRef.current) {
-            localStreamRef.current.getTracks().forEach(t => t.stop());
-            localStreamRef.current = null;
-        }
-        setLocalStream(null);
-
-        socket.emit("leave-room", { roomId, email: agent ? agent.email : ticketDetails?.clientEmail });
-        resetPeerConnection();
-
-        setIsRecording(false);
-        setIsRemoteRecording(false);
-        setRecordingDialog(false);
-        recordedChunksRef.current = [];
-        hasSentTelemetryRef.current = false;
-        setRemoteEmail(null); 
-
-        toast.success("Disconnected from room.");
-        navigate(agent ? "/dashboard" : "/");
-    };
-
     const handleEndTicket = async () => {
         try {
             const confirmEnd = window.confirm("Are you sure you want to resolve and permanently close this ticket?");
@@ -720,13 +833,12 @@ export default function Room() {
                 });
             }
 
+            // Emit dynamic real-time close-out signal to instantly disconnect client
+            socket.emit("ticket-resolved", { roomId });
+
             await ticketService.closeSupportTicket(roomId, "resolved", notes || "Closed cleanly.");
 
-            if (localStreamRef.current) {
-                localStreamRef.current.getTracks().forEach(t => t.stop());
-                localStreamRef.current = null;
-            }
-            setLocalStream(null);
+            stopAllLocalMedia();
 
             socket.emit("leave-room", { roomId, email: agent.email });
             resetPeerConnection();
@@ -847,7 +959,7 @@ export default function Room() {
                 </main>
 
                 {/* Sidebar Workspace */}
-                <aside className="w-80 border-l border-slate-100 bg-white flex flex-col shrink-0 select-none hidden lg:flex">
+                <aside className="w-80 border-l border-slate-100 bg-white flex flex-col shrink-0 select-none lg:flex">
                     {agent && <ClientTelemetry clientSpecs={clientSpecs} />}
 
                     <ChatPanel
