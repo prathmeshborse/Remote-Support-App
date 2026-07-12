@@ -6,6 +6,7 @@ const OTP = require("../models/OTP");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const generateToken = require('../utils/generateToken');
+const validator = require("validator");
 
 const otpGenerator = require("otp-generator");
 const mailSender = require("../utils/mailSender");
@@ -81,6 +82,14 @@ exports.signup = async (req, res) => {
                 message: "Passwords do not match",
             });
         }
+        
+        if (!validator.isEmail(email)) {
+            return res.status(400).json({
+                success: false,
+                message: "Please enter a valid email address"
+            });
+        }
+
 
         // 2. Check if the Agent already exists
         const existingAgent = await Agent.findOne({ email });
